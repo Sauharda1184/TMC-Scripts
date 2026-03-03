@@ -1,0 +1,23 @@
+c:/Users/sash006/Desktop/import/last.py
+
+============================================================
+ERROR: Error accessing camera 1: Length mismatch: Expected axis has 12 elements, new values have 11 elements
+
+Full traceback:
+Traceback (most recent call last):
+  File "c:\Users\sash006\Desktop\import\last.py", line 770, in Submit_button_command
+    df1.columns = column_names
+    ^^^^^^^^^^^
+  File "C:\Users\sash006\Desktop\import\venv\Lib\site-packages\pandas\core\generic.py", line 6220, in __setattr__
+    return object.__setattr__(self, name, value)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "pandas/_libs/properties.pyx", line 69, in pandas._libs.properties.AxisProperty.__set__
+  File "C:\Users\sash006\Desktop\import\venv\Lib\site-packages\pandas\core\generic.py", line 766, in _set_axis
+    self._mgr.set_axis(axis, labels)
+  File "C:\Users\sash006\Desktop\import\venv\Lib\site-packages\pandas\core\internals\managers.py", line 273, in set_axis
+    self._validate_set_axis(axis, new_labels)
+  File "C:\Users\sash006\Desktop\import\venv\Lib\site-packages\pandas\core\internals\managers.py", line 288, in _validate_set_axis
+    raise ValueError(
+ValueError: Length mismatch: Expected axis has 12 elements, new values have 11 elements
+============================================================
+
