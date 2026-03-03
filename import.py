@@ -501,14 +501,28 @@ class App:
         direction_list = []
         direction_number = 1
 
+        # Prepare date for direction detection - use user's start_date
+        # Convert start_date to GMT format for API call
+        direction_detection_start = convert_datetime_timezone(start_date + " 00:00:00", "US/Central", "Etc/GMT+0")
+        direction_detection_start = direction_detection_start.replace(" ", "T")
+        direction_detection_end = pd.to_datetime(start_date) + pd.DateOffset(days=1)
+        direction_detection_end = str(direction_detection_end)
+        direction_detection_end = direction_detection_end[:10]
+        direction_detection_end = convert_datetime_timezone(direction_detection_end + " 00:00:00", "US/Central", "Etc/GMT+0")
+        direction_detection_end = direction_detection_end.replace(" ", "T")
+
         try:
             while direction_number < 5  and nextstep == "yes":
                 # Goes to the data source according to the user input.
                 retro = ("http://" + ip_address_entry.get()  + "/api/v1/cameras/" + str(direction_number) + 
-                    "/bin-statistics?start-time=2024-05-08T00:00:00&end-time=2024-05-09T00:00:00")
+                    "/bin-statistics?start-time=" + direction_detection_start + "&end-time=" + direction_detection_end)
 
                 # Reads the webpage and retrieves all text on the page.
-                fix = rq.get(retro)
+                fix = rq.get(retro, timeout=10)
+                
+                # Check if the request was successful
+                if fix.status_code != 200:
+                    raise Exception(f"HTTP {fix.status_code}: {fix.reason}")
 
                 # Transfers all text from the webpage to a readable format.
                 soup2 = bs4.BeautifulSoup(fix.text, "lxml")
@@ -530,10 +544,16 @@ class App:
                 while direction_number < 5  and nextstep == "yes":
                     # Goes to the data source according to the user input.
                     retro = ("http://" + ip_address_entry.get()  + "/api/v1/cameras/" + str(direction_number) + 
-                        "/bin-statistics?start-time=2024-05-08T00:00:00&end-time=2024-05-09T00:00:00")
+                        "/bin-statistics?start-time=" + direction_detection_start + "&end-time=" + direction_detection_end)
 
                     # Reads the webpage and retrieves all text on the page.
-                    fix = rq.get(retro)
+                    fix = rq.get(retro, timeout=10)
+                    
+                    # Check if the request was successful
+                    if fix.status_code != 200:
+                        direction_list.append("NA")
+                        direction_number += 1
+                        continue
 
                     # Transfers all text from the webpage to a readable format.
                     soup2 = bs4.BeautifulSoup(fix.text, "lxml")
@@ -573,6 +593,21 @@ class App:
                 status_text.set("The IP address couldn't be found, or a camera is down.")
                 status_message["text"] = status_text.get()
                 nextstep = "no"
+        
+        except Exception as e:
+            # Handle network errors, HTTP errors, and other exceptions
+            if bypass == 1:
+                # If bypass is enabled, continue with default directions
+                while len(direction_list) < 4:
+                    direction_list.append("NA")
+            else:
+                error_msg = str(e)
+                if "HTTP" in error_msg or "Connection" in error_msg or "timeout" in error_msg.lower():
+                    status_text.set(f"Network error: {error_msg}. Check IP address and network connection.")
+                else:
+                    status_text.set(f"Error detecting camera directions: {error_msg}")
+                status_message["text"] = status_text.get()
+                nextstep = "no"
 
         while end_date != start_date and nextstep == "yes":
             # Sets the file name as the name of the intersection, plus the date for which data is collected.
@@ -602,7 +637,11 @@ class App:
                     "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                     # Reads the webpage and retrieves all text on the page.
-                    response = rq.get(data_source)
+                    response = rq.get(data_source, timeout=10)
+                    
+                    # Check if the request was successful
+                    if response.status_code != 200:
+                        raise Exception(f"HTTP {response.status_code}: {response.reason}")
 
                     # Transfers all text from the webpage to a readable format.
                     soup = bs4.BeautifulSoup(response.text, "lxml")
@@ -730,7 +769,11 @@ class App:
                     "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                     # Reads the webpage and retrieves all text on the page.
-                    response = rq.get(data_source)
+                    response = rq.get(data_source, timeout=10)
+                    
+                    # Check if the request was successful
+                    if response.status_code != 200:
+                        raise Exception(f"HTTP {response.status_code}: {response.reason}")
 
                     # Transfers all text from the webpage to a readable format.
                     soup = bs4.BeautifulSoup(response.text, "lxml")
