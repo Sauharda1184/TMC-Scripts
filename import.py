@@ -8,6 +8,8 @@ import pandas as pd
 import re
 import datetime
 import pytz
+import traceback
+import sys
 
 
 # Creates a simple user interface.
@@ -229,6 +231,16 @@ class App:
                                  command = mapping_dialog.destroy)
         cancel_button.place(x = 170, y = 210, width = 60, height = 30)
 
+    # Helper function to print errors to terminal
+    def print_error(self, error_msg, exception=None):
+        """Print error message to terminal with full traceback if available"""
+        print("\n" + "="*60, file=sys.stderr)
+        print("ERROR:", error_msg, file=sys.stderr)
+        if exception:
+            print("\nFull traceback:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        print("="*60 + "\n", file=sys.stderr)
+
     # Determines what happens when the "submit" button is clicked.
     # The rest of the program follows.
     def Submit_button_command(self):
@@ -258,14 +270,18 @@ class App:
 
             # Checks if the IP address entry is empty.
             if ip_address == "192.168.":
-                status_text.set("You have not entered any IP address.")
+                error_msg = "You have not entered any IP address."
+                print(f"\nERROR: {error_msg}\n", file=sys.stderr)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
                 break
 
             # Checks if the IP address entry is too short.
             if len(ip_address) <= 10:
-                status_text.set("The IP Address is too short.")
+                error_msg = "The IP Address is too short."
+                print(f"\nERROR: {error_msg}\n", file=sys.stderr)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
                 break
@@ -375,26 +391,34 @@ class App:
 
                 # Returns an error if the day is greater than 31 or less than 1.
                 if nextstep == "yes" and int(start_date[8:10]) == 0 or int(start_date[8:10]) >= 32:
-                    status_text.set("The starting day is incorrect.")
+                    error_msg = "The starting day is incorrect."
+                    print(f"\nERROR: {error_msg}\n", file=sys.stderr)
+                    status_text.set(error_msg)
                     status_message["text"] = status_text.get()
                     nextstep = "no"
 
                 # Returns an error if the month is greater than 12 or less than 1.
                 if nextstep == "yes" and int(start_date[5:7]) == 0 or int(start_date[5:7]) >= 13:
-                    status_text.set("The starting month is incorrect.")
+                    error_msg = "The starting month is incorrect."
+                    print(f"\nERROR: {error_msg}\n", file=sys.stderr)
+                    status_text.set(error_msg)
                     status_message["text"] = status_text.get()
                     nextstep = "no"
 
                 # Returns an error if the year is greater than 2099 or less than 1990.
                 if int(start_date[0:4]) >= 2099 or int(start_date[0:4]) <= 1990:
-                    status_text.set("The start year is outside the camera's scope.")
+                    error_msg = "The start year is outside the camera's scope."
+                    print(f"\nERROR: {error_msg}\n", file=sys.stderr)
+                    status_text.set(error_msg)
                     status_message["text"] = status_text.get()
                     nextstep = "no"
 
                 break
 
-            except ValueError:
-                status_text.set("The start date is empty or non-numerical.")
+            except ValueError as e:
+                error_msg = "The start date is empty or non-numerical."
+                self.print_error(error_msg, e)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
                 break
@@ -451,8 +475,10 @@ class App:
                 break
 
             # Returns an error if the end date is empty.
-            except ValueError:
-                status_text.set("The end date is empty or non-numerical.")
+            except ValueError as e:
+                error_msg = "The end date is empty or non-numerical."
+                self.print_error(error_msg, e)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
                 break
@@ -518,53 +544,83 @@ class App:
                     "/bin-statistics?start-time=" + direction_detection_start + "&end-time=" + direction_detection_end)
 
                 # Reads the webpage and retrieves all text on the page.
-                fix = rq.get(retro, timeout=10)
+                try:
+                    fix = rq.get(retro, timeout=10)
+                except rq.exceptions.RequestException as req_err:
+                    raise Exception(f"Network error connecting to camera {direction_number}: {str(req_err)}")
                 
                 # Check if the request was successful
                 if fix.status_code != 200:
-                    raise Exception(f"HTTP {fix.status_code}: {fix.reason}")
+                    raise Exception(f"HTTP {fix.status_code} from camera {direction_number}: {fix.reason}. URL: {retro}")
+
+                # Check if response has content
+                if not fix.text or len(fix.text.strip()) == 0:
+                    raise Exception(f"Empty response from camera {direction_number}. No data available for date range.")
 
                 # Transfers all text from the webpage to a readable format.
                 soup2 = bs4.BeautifulSoup(fix.text, "lxml")
                 fix = soup2.get_text()
+                
+                # Check if parsed text has enough content
+                if not fix or len(fix) < 15:
+                    raise Exception(f"Invalid response format from camera {direction_number}. Response too short or malformed.")
 
                 # Determines only the direction to append to zone names.
-                fix = fix.split(",")
-                fix = fix[1]
+                fix_parts = fix.split(",")
+                if len(fix_parts) < 2:
+                    raise Exception(f"Invalid response format from camera {direction_number}. Expected comma-separated data.")
+                
+                fix = fix_parts[1]
+                if len(fix) < 14:
+                    raise Exception(f"Invalid response format from camera {direction_number}. Direction data too short.")
+                
                 fix = fix[12:14]
                 direction_list.append(fix)
 
                 # Adds one to direction_number, and continues the while loop until all 4 directions are covered.
                 direction_number += 1
 
-        except IndexError:
+        except IndexError as idx_err:
+            # IndexError means the response format was unexpected - treat as data format error
             if bypass == 1:
                 direction_number += 1
                 direction_list.append("NA")
                 while direction_number < 5  and nextstep == "yes":
-                    # Goes to the data source according to the user input.
-                    retro = ("http://" + ip_address_entry.get()  + "/api/v1/cameras/" + str(direction_number) + 
-                        "/bin-statistics?start-time=" + direction_detection_start + "&end-time=" + direction_detection_end)
+                    try:
+                        # Goes to the data source according to the user input.
+                        retro = ("http://" + ip_address_entry.get()  + "/api/v1/cameras/" + str(direction_number) + 
+                            "/bin-statistics?start-time=" + direction_detection_start + "&end-time=" + direction_detection_end)
 
-                    # Reads the webpage and retrieves all text on the page.
-                    fix = rq.get(retro, timeout=10)
-                    
-                    # Check if the request was successful
-                    if fix.status_code != 200:
+                        # Reads the webpage and retrieves all text on the page.
+                        fix = rq.get(retro, timeout=10)
+                        
+                        # Check if the request was successful
+                        if fix.status_code != 200 or not fix.text:
+                            direction_list.append("NA")
+                            direction_number += 1
+                            continue
+
+                        # Transfers all text from the webpage to a readable format.
+                        soup2 = bs4.BeautifulSoup(fix.text, "lxml")
+                        fix = soup2.get_text()
+                        
+                        if not fix or len(fix) < 15:
+                            direction_list.append("NA")
+                            direction_number += 1
+                            continue
+
+                        # Determines only the direction to append to zone names.
+                        fix_parts = fix.split(",")
+                        if len(fix_parts) < 2 or len(fix_parts[1]) < 14:
+                            direction_list.append("NA")
+                            direction_number += 1
+                            continue
+                            
+                        fix = fix_parts[1][12:14]
+                        direction_list.append(fix)
+                    except:
                         direction_list.append("NA")
-                        direction_number += 1
-                        continue
-
-                    # Transfers all text from the webpage to a readable format.
-                    soup2 = bs4.BeautifulSoup(fix.text, "lxml")
-                    fix = soup2.get_text()
-
-                    # Determines only the direction to append to zone names.
-                    fix = fix.split(",")
-                    fix = fix[1]
-                    fix = fix[12:14]
-                    direction_list.append(fix)
-
+                    
                     # Adds one to direction_number, and continues the while loop until all 4 directions are covered.
                     direction_number = direction_number + 1
             
@@ -578,11 +634,13 @@ class App:
 
             else:
                 # If the URL doesn't work, then this error will be raised.
-                status_text.set("The IP address couldn't be found 1.")
+                error_msg = f"Camera {direction_number} returned invalid data format. Check IP address and date range. Error: {str(idx_err)}"
+                self.print_error(error_msg, idx_err)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
         
-        except ValueError:
+        except ValueError as val_err:
             # If there are only three cameras, then this will make sure an error is not raised
             # and instead we will continue with three directions.
             if direction_number == 4:
@@ -590,19 +648,32 @@ class App:
 
             else: 
                 # If less than 2 cameras are found, then raises an error.
-                status_text.set("The IP address couldn't be found, or a camera is down.")
+                error_msg = "The IP address couldn't be found, or a camera is down."
+                self.print_error(error_msg, val_err)
+                status_text.set(error_msg)
                 status_message["text"] = status_text.get()
                 nextstep = "no"
         
         except Exception as e:
             # Handle network errors, HTTP errors, and other exceptions
+            error_msg = str(e)
+            
+            # Print error to terminal
+            self.print_error(f"Error detecting camera directions: {error_msg}", e)
+            
             if bypass == 1:
                 # If bypass is enabled, continue with default directions
                 while len(direction_list) < 4:
                     direction_list.append("NA")
+                # Still show a warning
+                status_text.set(f"Warning: Some cameras had issues. Using bypass mode. Error: {error_msg}")
+                status_message["text"] = status_text.get()
             else:
-                error_msg = str(e)
-                if "HTTP" in error_msg or "Connection" in error_msg or "timeout" in error_msg.lower():
+                if "HTTP" in error_msg or "Network error" in error_msg:
+                    status_text.set(f"{error_msg}. Check IP address ({ip_address_entry.get()}) and ensure cameras are accessible.")
+                elif "Empty response" in error_msg or "Invalid response" in error_msg:
+                    status_text.set(f"{error_msg}. Try a different date range or check if cameras have data for {start_date}.")
+                elif "timeout" in error_msg.lower() or "Connection" in error_msg:
                     status_text.set(f"Network error: {error_msg}. Check IP address and network connection.")
                 else:
                     status_text.set(f"Error detecting camera directions: {error_msg}")
@@ -637,30 +708,66 @@ class App:
                     "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                     # Reads the webpage and retrieves all text on the page.
-                    response = rq.get(data_source, timeout=10)
+                    try:
+                        response = rq.get(data_source, timeout=10)
+                    except rq.exceptions.RequestException as req_err:
+                        raise Exception(f"Network error connecting to camera {camera_number}: {str(req_err)}")
                     
                     # Check if the request was successful
                     if response.status_code != 200:
-                        raise Exception(f"HTTP {response.status_code}: {response.reason}")
+                        raise Exception(f"HTTP {response.status_code} from camera {camera_number}: {response.reason}. URL: {data_source}")
+                    
+                    # Check if response has content
+                    if not response.text or len(response.text.strip()) == 0:
+                        raise Exception(f"Empty response from camera {camera_number}. No data available for {start_date}.")
 
                     # Transfers all text from the webpage to a readable format.
                     soup = bs4.BeautifulSoup(response.text, "lxml")
                     data = soup.get_text()
+                    
+                    # Check if parsed data has enough content
+                    if not data or len(data) < 20:
+                        raise Exception(f"Invalid response format from camera {camera_number}. Response too short or malformed.")
 
                     # Does some pre-data cleaning cleaning.
                     data = data[16:]
                     data = data.split("},")
+                    
+                    # Check if we got valid data
+                    if not data or len(data) == 0:
+                        raise Exception(f"No data records found from camera {camera_number} for {start_date}.")
 
                     # Saves the data to a modifiable data frame.
                     df1 = pd.DataFrame(data)
                     df1.columns = ['Data']
 
-                    # Splits the data by comma into 11 columns.
-                    df1 = df1['Data'].str.split(',', n=11, expand=True)
-
-                    # Names the columns.
-                    df1.columns = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
+                    # Splits the data by comma into 11 columns (n=10 produces 11 columns: 0-10).
+                    df1_split = df1['Data'].str.split(',', n=10, expand=True)
+                    
+                    # Ensure we have exactly 11 columns - create new DataFrame with exactly 11 columns
+                    expected_cols = 11
+                    column_names = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
                                     "Through", "Right", "Left", "LefttoRight", "RighttoLeft"]
+                    
+                    # Get the number of columns from split
+                    num_cols = df1_split.shape[1]
+                    
+                    # Create a dictionary to build the new DataFrame
+                    data_dict = {}
+                    num_rows = len(df1_split)
+                    for i in range(expected_cols):
+                        if i < num_cols:
+                            data_dict[i] = df1_split[i]
+                        else:
+                            # Add None column if missing - create a Series with None values
+                            data_dict[i] = pd.Series([None] * num_rows, index=df1_split.index)
+                    
+                    # Create new DataFrame with exactly expected_cols columns
+                    df1_new = pd.DataFrame(data_dict, index=df1_split.index)
+                    
+                    # Assign column names
+                    df1 = df1_new.copy()
+                    df1.columns = column_names
 
                     # Data cleaning - removes titles from each data point.
                     df1["Zone ID"] = df1["Zone ID"].str.replace('{"zoneId":', "")
@@ -688,9 +795,14 @@ class App:
                     # Adds one to our placeholder, until we reach 4.
                     camera_number += 1
 
-            except:
+            except Exception as e:
                 # If bypass has been checked, the program will skip a camera and continue the rest of the program.
                 # use with caution, as it may skew data.
+                error_msg = str(e)
+                
+                # Print error to terminal
+                self.print_error(f"Error accessing camera {camera_number}: {error_msg}", e)
+                
                 if bypass == 1:
                     camera_number += 1
                     
@@ -701,26 +813,62 @@ class App:
                             "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                             # Reads the webpage and retrieves all text on the page.
-                            response = rq.get(data_source)
+                            try:
+                                response = rq.get(data_source, timeout=10)
+                            except rq.exceptions.RequestException:
+                                camera_number += 1
+                                continue
+                            
+                            if response.status_code != 200 or not response.text:
+                                camera_number += 1
+                                continue
 
                             # Transfers all text from the webpage to a readable format.
                             soup = bs4.BeautifulSoup(response.text, "lxml")
                             data = soup.get_text()
 
+                            if not data or len(data) < 20:
+                                camera_number += 1
+                                continue
+
                             # Does some pre-data cleaning cleaning.
                             data = data[16:]
                             data = data.split("},")
+                            
+                            if not data or len(data) == 0:
+                                camera_number += 1
+                                continue
 
                             # Saves the data to a modifiable data frame.
                             df1 = pd.DataFrame(data)
                             df1.columns = ['Data']
 
-                            # Splits the data by comma into 11 columns.
-                            df1 = df1['Data'].str.split(',', n=11, expand=True)
-
-                            # Names the columns.
-                            df1.columns = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
+                            # Splits the data by comma into 11 columns (n=10 produces 11 columns: 0-10).
+                            df1_split = df1['Data'].str.split(',', n=10, expand=True)
+                            
+                            # Ensure we have exactly 11 columns - create new DataFrame with exactly 11 columns
+                            expected_cols = 11
+                            column_names = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
                                     "Through", "Right", "Left", "LefttoRight", "RighttoLeft"]
+                            
+                            # Get the number of columns from split
+                            num_cols = df1_split.shape[1]
+                            
+                            # Create a dictionary to build the new DataFrame
+                            data_dict = {}
+                            for i in range(expected_cols):
+                                if i < num_cols:
+                                    data_dict[i] = df1_split[i]
+                                else:
+                                    # Add None column if missing
+                                    data_dict[i] = None
+                            
+                            # Create new DataFrame with exactly expected_cols columns
+                            df1_new = pd.DataFrame(data_dict)
+                            
+                            # Assign column names
+                            df1 = df1_new.copy()
+                            df1.columns = column_names
 
                             # Data cleaning - removes titles from each data point.
                             df1["Zone ID"] = df1["Zone ID"].str.replace('{"zoneId":', "")
@@ -748,15 +896,25 @@ class App:
                             # Adds one to our placeholder, until we reach 4.
                             camera_number += 1
             
-                        except ValueError:
+                        except (ValueError, IndexError, KeyError, AttributeError) as parse_err:
                                 # If less than 2 cameras are found, then raises an error.
-                                status_text.set("A camera was bypassed, but multiple cameras have data issues.")
+                                error_msg = f"Camera {camera_number} data parsing failed: {str(parse_err)}. Check data format."
+                                self.print_error(error_msg, parse_err)
+                                status_text.set(error_msg)
                                 status_message["text"] = status_text.get()
                                 nextstep = "no"
+                                break
 
                 else:
-                    # If the URL doesn't work, then this error will be raised.
-                    status_text.set("The IP address couldn't be found 2.")
+                    # Provide detailed error message instead of generic one
+                    if "HTTP" in error_msg or "Network error" in error_msg:
+                        status_text.set(f"{error_msg}. Check IP address ({ip_address_entry.get()}) and network connection.")
+                    elif "Empty response" in error_msg or "No data records" in error_msg:
+                        status_text.set(f"{error_msg}. Try a different date range or check if cameras have data for {start_date}.")
+                    elif "Invalid response" in error_msg:
+                        status_text.set(f"{error_msg}. API may have changed format.")
+                    else:
+                        status_text.set(f"Error accessing camera {camera_number}: {error_msg}")
                     status_message["text"] = status_text.get()
                     nextstep = "no"
             
@@ -769,30 +927,65 @@ class App:
                     "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                     # Reads the webpage and retrieves all text on the page.
-                    response = rq.get(data_source, timeout=10)
+                    try:
+                        response = rq.get(data_source, timeout=10)
+                    except rq.exceptions.RequestException as req_err:
+                        raise Exception(f"Network error connecting to camera {camera_number}: {str(req_err)}")
                     
                     # Check if the request was successful
                     if response.status_code != 200:
-                        raise Exception(f"HTTP {response.status_code}: {response.reason}")
+                        raise Exception(f"HTTP {response.status_code} from camera {camera_number}: {response.reason}. URL: {data_source}")
+                    
+                    # Check if response has content
+                    if not response.text or len(response.text.strip()) == 0:
+                        raise Exception(f"Empty response from camera {camera_number}. No data available for {start_date}.")
 
                     # Transfers all text from the webpage to a readable format.
                     soup = bs4.BeautifulSoup(response.text, "lxml")
                     data = soup.get_text()
+                    
+                    # Check if parsed data has enough content
+                    if not data or len(data) < 20:
+                        raise Exception(f"Invalid response format from camera {camera_number}. Response too short or malformed.")
 
                     # Does some pre-data cleaning cleaning.
                     data = data[16:]
                     data = data.split("},")
+                    
+                    # Check if we got valid data
+                    if not data or len(data) == 0:
+                        raise Exception(f"No data records found from camera {camera_number} for {start_date}.")
 
                     # Saves the data to a modifiable data frame.
                     df2 = pd.DataFrame(data)
                     df2.columns = ['Data']
 
-                    # Splits the data by comma into 11 columns.
-                    df2 = df2['Data'].str.split(',', n=11, expand=True)
-
-                    # Names the columns.
-                    df2.columns = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
+                    # Splits the data by comma into 11 columns (n=10 produces 11 columns: 0-10).
+                    df2_split = df2['Data'].str.split(',', n=10, expand=True)
+                    
+                    # Ensure we have exactly 11 columns - create new DataFrame with exactly 11 columns
+                    expected_cols = 11
+                    column_names = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
                                     "Through", "Right", "Left", "LefttoRight", "RighttoLeft"]
+                    
+                    # Get the number of columns from split
+                    num_cols = df2_split.shape[1]
+                    
+                    # Create a dictionary to build the new DataFrame
+                    data_dict = {}
+                    for i in range(expected_cols):
+                        if i < num_cols:
+                            data_dict[i] = df2_split[i]
+                        else:
+                            # Add None column if missing
+                            data_dict[i] = None
+                    
+                    # Create new DataFrame with exactly expected_cols columns
+                    df2_new = pd.DataFrame(data_dict)
+                    
+                    # Assign column names
+                    df2 = df2_new.copy()
+                    df2.columns = column_names
 
                     # Data cleaning - removes titles from each data point.
                     df2["Zone ID"] = df2["Zone ID"].str.replace('{"zoneId":', "")
@@ -824,10 +1017,12 @@ class App:
                     df1 = pd.concat([df1, df2])
 
 
-            except:
+            except Exception as e:
 
                 # If bypass has been checked, the program will skip a camera and continue the rest of the program.
                 # use with caution, as it may skew data.
+                error_msg = str(e)
+                
                 if bypass == 1:
                     camera_number += 1
                     
@@ -838,26 +1033,62 @@ class App:
                             "/bin-statistics?start-time=" + start_of_day + "&end-time=" + end_of_day)
 
                             # Reads the webpage and retrieves all text on the page.
-                            response = rq.get(data_source)
+                            try:
+                                response = rq.get(data_source, timeout=10)
+                            except rq.exceptions.RequestException:
+                                camera_number += 1
+                                continue
+                            
+                            if response.status_code != 200 or not response.text:
+                                camera_number += 1
+                                continue
 
                             # Transfers all text from the webpage to a readable format.
                             soup = bs4.BeautifulSoup(response.text, "lxml")
                             data = soup.get_text()
+                            
+                            if not data or len(data) < 20:
+                                camera_number += 1
+                                continue
 
                             # Does some pre-data cleaning cleaning.
                             data = data[16:]
                             data = data.split("},")
+                            
+                            if not data or len(data) == 0:
+                                camera_number += 1
+                                continue
 
                             # Saves the data to a modifiable data frame.
                             df2 = pd.DataFrame(data)
                             df2.columns = ['Data']
 
-                            # Splits the data by comma into 11 columns.
-                            df2 = df2['Data'].str.split(',', n=11, expand=True)
-
-                            # Names the columns.
-                            df2.columns = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
+                            # Splits the data by comma into 11 columns (n=10 produces 11 columns: 0-10).
+                            df2_split = df2['Data'].str.split(',', n=10, expand=True)
+                            
+                            # Ensure we have exactly 11 columns - create new DataFrame with exactly 11 columns
+                            expected_cols = 11
+                            column_names = ["Zone ID", "Zone Name", "Time", "Average Speed", "Volume", "Occupancy", 
                                     "Through", "Right", "Left", "LefttoRight", "RighttoLeft"]
+                            
+                            # Get the number of columns from split
+                            num_cols = df2_split.shape[1]
+                            
+                            # Create a dictionary to build the new DataFrame
+                            data_dict = {}
+                            for i in range(expected_cols):
+                                if i < num_cols:
+                                    data_dict[i] = df2_split[i]
+                                else:
+                                    # Add None column if missing
+                                    data_dict[i] = None
+                            
+                            # Create new DataFrame with exactly expected_cols columns
+                            df2_new = pd.DataFrame(data_dict)
+                            
+                            # Assign column names
+                            df2 = df2_new.copy()
+                            df2.columns = column_names
 
                             # Data cleaning - removes titles from each data point.
                             df2["Zone ID"] = df2["Zone ID"].str.replace('{"zoneId":', "")
@@ -888,11 +1119,14 @@ class App:
                             # Appends the other directions to a dataframe with the initial camera.
                             df1 = pd.concat([df1, df2])
             
-                        except ValueError:
+                        except (ValueError, IndexError, KeyError, AttributeError) as parse_err:
                                 # If less than 2 cameras are found, then raises an error.
-                                status_text.set("A camera was bypassed, but multiple cameras have data issues.")
+                                error_msg = f"Camera {camera_number} data parsing failed: {str(parse_err)}. Check data format."
+                                self.print_error(error_msg, parse_err)
+                                status_text.set(error_msg)
                                 status_message["text"] = status_text.get()
                                 nextstep = "no"
+                                break
 
                 # If there are only three cameras, then this will make sure an error is not raised
                 # and instead we will continue with three directions.
@@ -900,8 +1134,15 @@ class App:
                     pass
 
                 else: 
-                    # If less than 2 cameras are found, then raises an error.
-                    status_text.set("All cameras couldn't be found- check most recent date.")
+                    # Provide detailed error message instead of generic one
+                    if "HTTP" in error_msg or "Network error" in error_msg:
+                        status_text.set(f"{error_msg}. Check IP address ({ip_address_entry.get()}) and network connection.")
+                    elif "Empty response" in error_msg or "No data records" in error_msg:
+                        status_text.set(f"{error_msg}. Try a different date range or check if cameras have data for {start_date}.")
+                    elif "Invalid response" in error_msg:
+                        status_text.set(f"{error_msg}. API may have changed format.")
+                    else:
+                        status_text.set(f"Error accessing camera {camera_number}: {error_msg}")
                     status_message["text"] = status_text.get()
                     nextstep = "no"
 
@@ -962,8 +1203,8 @@ class App:
                 # Converts Consultant Time to a string so that we can manipulate it through slicing.
                 exiting["Consultant Time"] = exiting["Consultant Time"].astype("string")
 
-                # Adds in 12:00 AM.
-                exiting["Consultant Time"].fillna("0000", inplace = True)
+                # Adds in 12:00 AM - fix chained assignment warning by using direct assignment
+                exiting["Consultant Time"] = exiting["Consultant Time"].fillna("0000")
 
                 # Adds in 12:15 AM.
                 exiting["Consultant Time"] = exiting["Consultant Time"].str.replace("]", "0015")
@@ -980,16 +1221,45 @@ class App:
 
                 # Changes zone name to a string, and time to a integer format.
                 exiting["Zone Name"] = exiting["Zone Name"].astype("string")
-                exiting["Consultant Time"] = exiting["Consultant Time"].astype("int64")
+                # Handle any remaining NA values before converting to int64
+                exiting["Consultant Time"] = exiting["Consultant Time"].fillna("0000")
+                exiting["Consultant Time"] = exiting["Consultant Time"].replace("", "0000")
+                exiting["Consultant Time"] = exiting["Consultant Time"].replace("nan", "0000")
+                exiting["Consultant Time"] = exiting["Consultant Time"].replace("<NA>", "0000")
+                # Convert to numeric first, then to int64, handling any errors
+                exiting["Consultant Time"] = pd.to_numeric(exiting["Consultant Time"], errors='coerce').fillna(0).astype("int64")
 
                 # Changes volumes to integers to be added in the next step.
                 exiting["Left"] = exiting["Left"].astype("int64")
                 exiting["Through"] = exiting["Through"].astype("int64")
                 exiting["Right"] = exiting["Right"].astype("int64")
 
+                # Determine which directions actually have data
+                available_directions = set()
+                if len(exiting) > 0:
+                    zone_name_prefixes = exiting["Zone Name"].str[0:2].unique()
+                    for prefix in zone_name_prefixes:
+                        if prefix in ["EB", "WB", "NB", "SB"]:
+                            available_directions.add(prefix)
+                
+                # Build column list dynamically based on available directions
+                summary_columns = ["Time"]
+                direction_columns = {
+                    "EB": ["EBL", "EBT", "EBR"],
+                    "WB": ["WBL", "WBT", "WBR"],
+                    "NB": ["NBL", "NBT", "NBR"],
+                    "SB": ["SBL", "SBT", "SBR"]
+                }
+                
+                # Add columns for each available direction
+                for direction in ["EB", "WB", "NB", "SB"]:
+                    if direction in available_directions:
+                        summary_columns.extend(direction_columns[direction])
+                
+                summary_columns.append("Veh Total")
+                
                 # Makes a new table with our summary statistics.
-                summary = pd.DataFrame(columns = ["Time", "EBL", "EBT", "EBR", "WBL", "WBT", "WBR", 
-                                                    "NBL", "NBT", "NBR", "SBL", "SBT", "SBR", "Veh Total"])
+                summary = pd.DataFrame(columns=summary_columns)
 
                 # Creates empty lists, to put all of our times in at the end.
                 summary_time = []
@@ -1090,23 +1360,39 @@ class App:
 
                 # Now, we add all of our time values to our summary table.
                 summary["Time"] = summary_time
-                summary["EBL"] = ebl
-                summary["EBT"] = ebt
-                summary["EBR"] = ebr
-                summary["WBL"] = wbl
-                summary["WBT"] = wbt
-                summary["WBR"] = wbr
-                summary["NBL"] = nbl
-                summary["NBT"] = nbt
-                summary["NBR"] = nbr
-                summary["SBL"] = sbl
-                summary["SBT"] = sbt
-                summary["SBR"] = sbr
+                
+                # Add columns only for directions that have data
+                if "EB" in available_directions:
+                    summary["EBL"] = ebl
+                    summary["EBT"] = ebt
+                    summary["EBR"] = ebr
+                if "WB" in available_directions:
+                    summary["WBL"] = wbl
+                    summary["WBT"] = wbt
+                    summary["WBR"] = wbr
+                if "NB" in available_directions:
+                    summary["NBL"] = nbl
+                    summary["NBT"] = nbt
+                    summary["NBR"] = nbr
+                if "SB" in available_directions:
+                    summary["SBL"] = sbl
+                    summary["SBT"] = sbt
+                    summary["SBR"] = sbr
+                
                 summary["Veh Total"] = vehicle_total
 
                 # Then, we get totals for each individual direction.
-                directional_total = ["Total", sum(ebl), sum(ebt), sum(ebr), sum(wbl), sum(wbt), sum(wbr), 
-                                    sum(nbl), sum(nbt), sum(nbr), sum(sbl), sum(sbt), sum(sbr), sum(vehicle_total)]
+                directional_total = ["Total"]
+                if "EB" in available_directions:
+                    directional_total.extend([sum(ebl), sum(ebt), sum(ebr)])
+                if "WB" in available_directions:
+                    directional_total.extend([sum(wbl), sum(wbt), sum(wbr)])
+                if "NB" in available_directions:
+                    directional_total.extend([sum(nbl), sum(nbt), sum(nbr)])
+                if "SB" in available_directions:
+                    directional_total.extend([sum(sbl), sum(sbt), sum(sbr)])
+                directional_total.append(sum(vehicle_total))
+                
                 summary.loc[len(summary)] = directional_total
 
                 # We set our summary index as time to set it as our leftmost column.
