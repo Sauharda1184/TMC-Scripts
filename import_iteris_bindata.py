@@ -1,19 +1,36 @@
 """
-Convert Iteris Vantage exported bin-data text files into tidy CSV.
+Convert Iteris Vantage exported bin-data text files into CSV.
 
-Input format matches the user guide (zone, timestamp, seven numeric fields,
-video status, label) — e.g. bindata exports like *bindata-YYYY-MM-DD.txt.
+Primary output matches typical TMC summary layout: Time (HHMM), EBL..SBR, Veh Total,
+plus a Total row (same shape as Vision-style intersection summaries).
 
-MQTT live streams (/iteris/count/) are JSON and not the same as this file format;
-use this tool for exported bindata logs.
+Uses direction bins only (zones 501–512: LT / Through / RT per sensor). Map each
+sensor (C1–C4) to EB/WB/NB/SB via the Directions dialog or defaults.
+
+Also writes *_detail.csv (long tidy rows) for all zone types.
+
+For live pull from the camera via MQTT (/iteris/count/), see import_iteris_mqtt.py.
 """
 
 from __future__ import annotations
 
 import csv
+import datetime
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
+
+# TMC summary columns (match Vision / standard count sheet layout).
+_CARDINALS = ("EB", "WB", "NB", "SB")
+_LTR = ("L", "T", "R")
+SUMMARY_FIELDNAMES = (
+    ["Time"]
+    + [f"{c}{m}" for c in _CARDINALS for m in _LTR]
+    + ["Veh Total"]
+)
+
+_MOVEMENT_TO_COL_SUFFIX = {"LT": "L", "Through": "T", "RT": "R"}
 
 # Column order for CSV output (remaining keys are appended alphabetically).
 _CSV_KEY_ORDER = [
@@ -236,6 +253,85 @@ def parse_bindata_line(line: str) -> dict | None:
     return row
 
 
+def parse_iteris_count_date(iso_s: str) -> datetime.datetime | None:
+    """Parse the Vantage count stream \"date\" field (ISO with optional ±HHMM suffix)."""
+    if not iso_s or not isinstance(iso_s, str):
+        return None
+    s = iso_s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if re.search(r"[+-]\d{4}$", s) and not re.search(r"[+-]\d{2}:\d{2}$", s):
+        s = re.sub(r"([+-])(\d{2})(\d{2})$", r"\1\2:\3", s)
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def floor_datetime_to_bin(dt: datetime.datetime, bin_minutes: int) -> datetime.datetime:
+    """Floor wall time to bin start (e.g. 15 min). Preserves tzinfo if present."""
+    if bin_minutes <= 1:
+        return dt.replace(second=0, microsecond=0)
+    total_min = dt.hour * 60 + dt.minute
+    floored = (total_min // bin_minutes) * bin_minutes
+    h, m = divmod(floored, 60)
+    return dt.replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def synthetic_direction_rows_from_mqtt_payload(
+    payload: dict,
+    *,
+    target_date: str | None = None,
+    bin_minutes: int = 15,
+) -> list[dict]:
+    """
+    One /iteris/count/ JSON object (Rev B) → synthetic rows for build_tmc_summary.
+
+    Count values are \"in the last 60 seconds\" per the API doc; multiple messages
+    in the same 15-minute wall bin are summed when passed through build_tmc_summary.
+    """
+    rows: list[dict] = []
+    dt = parse_iteris_count_date(payload.get("date") or "")
+    if dt is None:
+        return rows
+    d_str = dt.strftime("%Y-%m-%d")
+    if target_date is not None and d_str != target_date:
+        return rows
+    dt_bin = floor_datetime_to_bin(dt, bin_minutes)
+    ts_str = dt_bin.strftime("%Y-%m-%d %H:%M:%S")
+
+    for zone in range(501, 513):
+        key = f"Z{zone}"
+        if key not in payload:
+            continue
+        raw_v = payload[key]
+        try:
+            vol = int(raw_v)
+        except (TypeError, ValueError):
+            continue
+        if vol == 0:
+            continue
+        cat, movement = classify_zone(zone)
+        if cat != "direction_lt_through_rt":
+            continue
+        sensor = sensor_from_direction_zone(zone)
+        if sensor is None:
+            continue
+        rows.append(
+            {
+                "record_type": "bin",
+                "zone_number": zone,
+                "record_category": cat,
+                "movement": movement,
+                "sensor": sensor,
+                "timestamp": ts_str,
+                "volume": vol,
+                "source_file": "mqtt:/iteris/count/",
+            }
+        )
+    return rows
+
+
 def parse_bindata_file(path: Path) -> list[dict]:
     rows: list[dict] = []
     with path.open(encoding="utf-8", errors="replace") as f:
@@ -245,6 +341,88 @@ def parse_bindata_file(path: Path) -> list[dict]:
                 rec["source_file"] = path.name
                 rows.append(rec)
     return rows
+
+
+def timestamp_to_hhmm(ts: str) -> int | None:
+    """Bin start time as integer HHMM (e.g. 0, 15, 1545) like standard TMC CSV."""
+    ts = (ts or "").strip()
+    m = re.match(r"^\d{4}-\d{2}-\d{2}\s+(\d{2}):(\d{2}):\d{2}$", ts)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    return h * 100 + mi
+
+
+def build_tmc_summary(
+    rows: list[dict],
+    sensor_to_cardinal: dict[int, str],
+) -> list[dict]:
+    """
+    Aggregate direction-bin volumes (501–512) into one row per time bin.
+    sensor_to_cardinal: e.g. {1: \"EB\", 2: \"WB\", 3: \"NB\", 4: \"SB\"}.
+    """
+    acc: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for r in rows:
+        if r.get("record_type") != "bin":
+            continue
+        if r.get("record_category") != "direction_lt_through_rt":
+            continue
+        sensor = r.get("sensor")
+        if sensor not in sensor_to_cardinal:
+            continue
+        card = sensor_to_cardinal[sensor]
+        if card not in _CARDINALS:
+            continue
+        suf = _MOVEMENT_TO_COL_SUFFIX.get(r.get("movement") or "")
+        if not suf:
+            continue
+        vol = r.get("volume")
+        if vol is None:
+            continue
+        try:
+            v = int(round(float(vol)))
+        except (TypeError, ValueError):
+            continue
+        tkey = timestamp_to_hhmm(r.get("timestamp") or "")
+        if tkey is None:
+            continue
+        acc[tkey][f"{card}{suf}"] += v
+
+    out: list[dict] = []
+    for tkey in sorted(acc.keys()):
+        row: dict = {"Time": tkey}
+        veh = 0
+        for c in _CARDINALS:
+            for m in _LTR:
+                k = f"{c}{m}"
+                val = acc[tkey].get(k, 0)
+                row[k] = val
+                veh += val
+        row["Veh Total"] = veh
+        out.append(row)
+
+    if out:
+        total: dict = {"Time": "Total"}
+        for c in _CARDINALS:
+            for m in _LTR:
+                k = f"{c}{m}"
+                total[k] = sum(int(r.get(k, 0) or 0) for r in out)
+        total["Veh Total"] = sum(int(r.get("Veh Total", 0) or 0) for r in out)
+        out.append(total)
+
+    return out
+
+
+def write_tmc_summary_csv(path: Path, summary_rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(SUMMARY_FIELDNAMES), extrasaction="ignore")
+        w.writeheader()
+        for r in summary_rows:
+            w.writerow(
+                {k: ("" if r.get(k) is None else r.get(k, "")) for k in SUMMARY_FIELDNAMES}
+            )
 
 
 def _csv_fieldnames(rows: list[dict]) -> list[str]:
@@ -267,18 +445,33 @@ def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
             w.writerow({k: ("" if r.get(k) is None else r.get(k, "")) for k in fieldnames})
 
 
-def write_outputs(rows: list[dict], out_base: Path) -> tuple[Path, Path | None]:
-    """Write tidy CSV; if malformed/log rows exist, write a second diagnostics CSV."""
-    tidy_path = out_base.with_suffix(".csv")
+def write_outputs(
+    rows: list[dict],
+    out_base: Path,
+    sensor_to_cardinal: dict[int, str],
+) -> tuple[Path, Path | None, Path | None, list[dict]]:
+    """
+    Writes:
+      {out_base}.csv — TMC summary (Time, EBL..SBR, Veh Total, Total row)
+      {out_base}_detail.csv — long tidy rows (all zone types)
+      {out_base}_skipped_or_log.csv — optional diagnostics
+    Returns (summary_path, detail_path, diag_path, summary_rows).
+    """
+    summary_rows = build_tmc_summary(rows, sensor_to_cardinal)
+    summary_path = out_base.with_suffix(".csv")
+    write_tmc_summary_csv(summary_path, summary_rows)
+
+    detail_path = out_base.with_name(out_base.stem + "_detail.csv")
     fieldnames = _csv_fieldnames(rows)
-    _write_csv(tidy_path, rows, fieldnames)
+    _write_csv(detail_path, rows, fieldnames)
 
     extra = [r for r in rows if r.get("record_type") in ("malformed", "log")]
     diag_path = None
     if extra:
         diag_path = out_base.with_name(out_base.stem + "_skipped_or_log.csv")
         _write_csv(diag_path, extra, _csv_fieldnames(extra))
-    return tidy_path, diag_path
+
+    return summary_path, detail_path, diag_path, summary_rows
 
 
 class App:
@@ -291,8 +484,16 @@ class App:
         self._messagebox = messagebox
         self._filedialog = filedialog
 
+        # Sensor index (1–4) → cardinal for TMC columns (must match your intersection).
+        self.sensor_to_cardinal: dict[int, str] = {
+            1: "EB",
+            2: "WB",
+            3: "NB",
+            4: "SB",
+        }
+
         root.title("Iteris Vantage bin-data → CSV")
-        w, h = 520, 220
+        w, h = 520, 268
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         root.geometry(f"{w}x{h}+{int((sw - w) / 2)}+{int((sh - h) / 2)}")
         root.resizable(False, False)
@@ -310,22 +511,70 @@ class App:
             x=420, y=36, width=80, height=28
         )
 
-        tk.Label(root, font=ft, text="Output CSV (optional; default = same folder + .csv):").place(
-            x=12, y=72, height=24
+        tk.Label(root, font=ft, text="Output CSV base (main + _detail.csv):").place(
+            x=12, y=68, height=24
         )
         tk.Entry(root, font=ft, textvariable=self.output_path, width=52).place(
-            x=12, y=98, width=400, height=26
+            x=12, y=94, width=400, height=26
         )
         tk.Button(root, font=ft, text="Browse…", command=self.browse_out).place(
-            x=420, y=96, width=80, height=28
+            x=420, y=92, width=80, height=28
         )
 
+        tk.Button(root, font=ft, text="Directions…", command=self.show_direction_dialog).place(
+            x=12, y=130, width=88, height=28
+        )
+        tk.Label(
+            root,
+            font=ft,
+            justify="left",
+            text="Map C1–C4 sensors to EB/WB/NB/SB for the summary sheet.",
+        ).place(x=108, y=128, width=392, height=32)
+
         tk.Button(root, font=ft, text="Convert", command=self.convert).place(
-            x=12, y=140, width=100, height=32
+            x=12, y=168, width=100, height=32
         )
         tk.Label(root, font=ft, textvariable=self.status, anchor="w", relief="sunken").place(
-            x=12, y=182, width=488, height=28
+            x=12, y=212, width=488, height=28
         )
+
+    def show_direction_dialog(self) -> None:
+        import tkinter.font as tkFont
+
+        tk = self._tk
+        d = tk.Toplevel()
+        d.title("Sensor → approach (TMC columns)")
+        w, h = 320, 220
+        sw, sh = d.winfo_screenwidth(), d.winfo_screenheight()
+        d.geometry(f"{w}x{h}+{int((sw - w) / 2)}+{int((sh - h) / 2)}")
+        ft = tkFont.Font(family="Times", size=11)
+        choices = ["EB", "WB", "NB", "SB"]
+        entries: dict[int, tk.Entry] = {}
+        y = 16
+        for i in range(1, 5):
+            tk.Label(d, font=ft, text=f"Sensor {i} (C{i}):").place(x=20, y=y, width=100, height=24)
+            e = tk.Entry(d, font=ft, width=6)
+            e.place(x=130, y=y, width=56, height=24)
+            e.insert(0, self.sensor_to_cardinal.get(i, "EB"))
+            entries[i] = e
+            y += 36
+
+        def save() -> None:
+            m: dict[int, str] = {}
+            for i in range(1, 5):
+                v = entries[i].get().strip().upper()
+                if v not in choices:
+                    self._messagebox.showerror(
+                        "Invalid",
+                        f"Sensor {i} must be one of: {', '.join(choices)}",
+                    )
+                    return
+                m[i] = v
+            self.sensor_to_cardinal = m
+            d.destroy()
+
+        tk.Button(d, font=ft, text="Save", command=save).place(x=80, y=180, width=60, height=28)
+        tk.Button(d, font=ft, text="Cancel", command=d.destroy).place(x=160, y=180, width=60, height=28)
 
     def browse_in(self) -> None:
         p = self._filedialog.askopenfilename(
@@ -373,12 +622,22 @@ class App:
             self._messagebox.showinfo("Done", "No rows found in file.")
             return
 
-        tidy, diag = write_outputs(rows, out_base)
+        summary_p, detail_p, diag, summ = write_outputs(
+            rows, out_base, self.sensor_to_cardinal
+        )
         n_bin = sum(1 for r in rows if r.get("record_type") == "bin")
-        n_other = len(rows) - n_bin
-        msg = f"Wrote {tidy.name} ({len(rows)} rows, {n_bin} bin rows)."
+        n_intervals = max(0, len(summ) - 1) if summ else 0
+        msg = (
+            f"Summary: {summary_p.name} ({n_intervals} time bins + Total). "
+            f"Detail: {detail_p.name} ({n_bin} bin rows)."
+        )
+        if not summ:
+            msg = (
+                f"No direction bins (501–512) for summary—wrote header only. "
+                f"Detail: {detail_p.name}. Check sensor→EB/WB/NB/SB mapping."
+            )
         if diag:
-            msg += f" See also {diag.name} ({n_other} log/malformed)."
+            msg += f" Diagnostics: {diag.name}."
         self.status.set(msg)
         self._messagebox.showinfo("Done", msg)
 
@@ -387,7 +646,9 @@ def main_cli(argv: list[str]) -> int:
     if len(argv) < 2:
         print(
             "Usage: python import_iteris_bindata.py <bindata.txt> [output_base]\n"
-            "  output_base: path without extension for CSV (default: <input_stem>_clean)",
+            "  Writes <output_base>.csv (TMC summary: Time, EBL..SBR, Veh Total)\n"
+            "  and <output_base>_detail.csv (long format). Default output_base: <stem>_clean\n"
+            "  Sensor→EB/WB/NB/SB mapping defaults to 1=EB, 2=WB, 3=NB, 4=SB (GUI to edit).",
             file=sys.stderr,
         )
         return 2
@@ -397,8 +658,10 @@ def main_cli(argv: list[str]) -> int:
         print(f"Not found: {src}", file=sys.stderr)
         return 1
     rows = parse_bindata_file(src)
-    tidy, diag = write_outputs(rows, out)
-    print(f"Wrote {tidy}")
+    default_cardinals = {1: "EB", 2: "WB", 3: "NB", 4: "SB"}
+    summary_p, detail_p, diag, summ = write_outputs(rows, out, default_cardinals)
+    print(f"Wrote {summary_p} (TMC summary, {len(summ)} rows incl. Total if any)")
+    print(f"Wrote {detail_p} (all zones, long format)")
     if diag:
         print(f"Wrote {diag}")
     return 0

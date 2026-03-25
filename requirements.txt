@@ -5,4 +5,7 @@ requests>=2.28.0
 pandas>=2.0.0
 pytz>=2024.1
 
+# Iteris live MQTT collector (import_iteris_mqtt.py)
+paho-mqtt>=2.0.0
+
 # import_iteris_bindata.py uses only the Python standard library (plus tkinter for the GUI).
