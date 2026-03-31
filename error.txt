@@ -1,0 +1,16 @@
+c:/Users/sash006/desktop/new_import/.venv/Scripts/python.exe c:/Users/sash006/Desktop/new_import/new_extract.py
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "C:\Users\sash006\AppData\Roaming\uv\python\cpython-3.13.11-windows-x86_64-none\Lib\tkinter\__init__.py", line 2074, in __call__        
+    return self.func(*args)
+           ~~~~~~~~~^^^^^^^
+  File "c:\Users\sash006\Desktop\new_import\new_extract.py", line 658, in browse_in
+    p = self._filedialog.askopenfilename(
+        title="Bin data text file",
+        filetypes=[("Text", "*.txt"), ("All", "*.*")],
+    )
+  File "C:\Users\sash006\AppData\Roaming\uv\python\cpython-3.13.11-windows-x86_64-none\Lib\tkinter\filedialog.py", line 384, in askopenfilename    return Open(**options).show()
+           ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\sash006\AppData\Roaming\uv\python\cpython-3.13.11-windows-x86_64-none\Lib\tkinter\commondialog.py", line 45, in show
+    s = master.tk.call(self.command, *master._options(self.options))
+KeyboardInterrupt
