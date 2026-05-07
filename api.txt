@@ -1,0 +1,1 @@
+http://192.168.123.201/api/v1/cameras/4/bin-statistics?start-time=2025-04-08T11:00:00&end-time=2025-04-09T00:00:00
